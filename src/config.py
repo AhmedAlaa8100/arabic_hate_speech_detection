@@ -4,6 +4,7 @@ Contains all hyperparameters, paths, and settings.
 """
 
 import os
+import json
 from dataclasses import dataclass
 from typing import Optional
 
@@ -50,17 +51,57 @@ class Config:
     logging_steps: int = 100
     early_stopping_patience: int = 3
     
-    # Device
-    device: str = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+    # Device Configuration
+    device: str = "auto"  # auto, cuda, cpu, or specific GPU like "cuda:0"
+    force_cpu: bool = False  # Set to True to force CPU usage even if CUDA is available
+    mixed_precision: bool = True  # Enable mixed precision training for better performance
+    dataloader_pin_memory: bool = True  # Pin memory for faster GPU transfer
     
     # Random seed for reproducibility
     seed: int = 42
+    
+    # New configuration options
+    loss_function: str = "ce"  # ce, weighted, focal
+    threshold: float = 0.5  # Probability threshold for classification
+    use_sampler: bool = False  # Use WeightedRandomSampler for oversampling
+    focal_alpha: float = 1.0  # Alpha parameter for focal loss
+    focal_gamma: float = 2.0  # Gamma parameter for focal loss
     
     def __post_init__(self):
         """Create necessary directories after initialization."""
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.models_dir, exist_ok=True)
         os.makedirs(self.results_dir, exist_ok=True)
+    
+    @classmethod
+    def from_json(cls, config_path: str = "config.json"):
+        """
+        Load configuration from JSON file.
+        
+        Args:
+            config_path: Path to the JSON configuration file
+            
+        Returns:
+            Config instance loaded from JSON
+        """
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_dict = json.load(f)
+            
+            # Create config instance with default values
+            config = cls()
+            
+            # Update with values from JSON
+            for key, value in config_dict.items():
+                if hasattr(config, key):
+                    setattr(config, key, value)
+                else:
+                    print(f"Warning: Unknown configuration key '{key}' in {config_path}")
+            
+            return config
+        else:
+            print(f"Warning: Config file {config_path} not found, using default values")
+            return cls()
 
 # Global config instance
-config = Config()
+config = Config.from_json()

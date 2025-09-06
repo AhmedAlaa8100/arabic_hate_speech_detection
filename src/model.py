@@ -10,6 +10,7 @@ import logging
 
 from .config import Config
 from .utils import setup_logging, count_parameters
+from .losses import get_loss_function
 
 logger = setup_logging("model.log")
 
@@ -22,7 +23,11 @@ class ArabicHateSpeechClassifier(nn.Module):
                  model_name: str, 
                  num_labels: int = 2,
                  dropout_rate: float = 0.1,
-                 freeze_bert: bool = False):
+                 freeze_bert: bool = False,
+                 loss_function: str = "ce",
+                 class_weights: Optional[torch.Tensor] = None,
+                 focal_alpha: float = 1.0,
+                 focal_gamma: float = 2.0):
         """
         Initialize the model.
         
@@ -31,6 +36,10 @@ class ArabicHateSpeechClassifier(nn.Module):
             num_labels: Number of classification labels
             dropout_rate: Dropout rate for the classifier
             freeze_bert: Whether to freeze BERT parameters
+            loss_function: Type of loss function ('ce', 'weighted', 'focal')
+            class_weights: Class weights for weighted loss
+            focal_alpha: Alpha parameter for focal loss
+            focal_gamma: Gamma parameter for focal loss
         """
         super(ArabicHateSpeechClassifier, self).__init__()
         
@@ -38,6 +47,8 @@ class ArabicHateSpeechClassifier(nn.Module):
         self.num_labels = num_labels
         self.dropout_rate = dropout_rate
         self.freeze_bert = freeze_bert
+        self.loss_function = loss_function
+        self.class_weights = class_weights
         
         # Load pre-trained model and config
         self.config = AutoConfig.from_pretrained(model_name)
@@ -59,8 +70,17 @@ class ArabicHateSpeechClassifier(nn.Module):
         # Initialize classifier weights
         self._init_classifier_weights()
         
+        # Initialize loss function
+        self.loss_fn = get_loss_function(
+            loss_function, 
+            class_weights=class_weights,
+            alpha=focal_alpha,
+            gamma=focal_gamma
+        )
+        
         logger.info(f"Model initialized with {count_parameters(self)} parameters")
         logger.info(f"Trainable parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad)}")
+        logger.info(f"Loss function: {loss_function}")
     
     def _init_classifier_weights(self):
         """Initialize classifier weights."""
@@ -101,8 +121,7 @@ class ArabicHateSpeechClassifier(nn.Module):
         
         # Calculate loss if labels are provided
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            loss = self.loss_fn(logits.view(-1, self.num_labels), labels.view(-1))
             outputs["loss"] = loss
         
         return outputs
@@ -178,17 +197,22 @@ class ModelManager:
             config: Configuration object
         """
         self.config = config
-        self.device = torch.device(config.device)
+        if config.device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(config.device)
     
     def create_model(self, 
                     freeze_bert: bool = False,
-                    dropout_rate: float = 0.1) -> ArabicHateSpeechClassifier:
+                    dropout_rate: float = 0.1,
+                    class_weights: Optional[torch.Tensor] = None) -> ArabicHateSpeechClassifier:
         """
         Create a new model instance.
         
         Args:
             freeze_bert: Whether to freeze BERT parameters
             dropout_rate: Dropout rate for the classifier
+            class_weights: Class weights for weighted loss
             
         Returns:
             Model instance
@@ -197,7 +221,11 @@ class ModelManager:
             model_name=self.config.model_name,
             num_labels=self.config.num_labels,
             dropout_rate=dropout_rate,
-            freeze_bert=freeze_bert
+            freeze_bert=freeze_bert,
+            loss_function=self.config.loss_function,
+            class_weights=class_weights,
+            focal_alpha=self.config.focal_alpha,
+            focal_gamma=self.config.focal_gamma
         )
         
         model.to(self.device)
@@ -257,7 +285,7 @@ class ModelManager:
         Returns:
             Dictionary containing loaded information
         """
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         
         model.load_state_dict(checkpoint['model_state_dict'])
         

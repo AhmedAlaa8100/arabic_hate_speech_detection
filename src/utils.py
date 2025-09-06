@@ -116,8 +116,26 @@ def clean_text(text: str) -> str:
 
 def save_metrics(metrics: Dict[str, Any], filepath: str) -> None:
     """Save metrics to JSON file."""
+    def convert_numpy_types(obj):
+        """Convert NumPy types to Python native types for JSON serialization."""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: convert_numpy_types(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_types(item) for item in obj]
+        else:
+            return obj
+    
+    # Convert NumPy types to Python native types
+    converted_metrics = convert_numpy_types(metrics)
+    
     with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(metrics, f, indent=2, ensure_ascii=False)
+        json.dump(converted_metrics, f, indent=2, ensure_ascii=False)
 
 def load_metrics(filepath: str) -> Dict[str, Any]:
     """Load metrics from JSON file."""
@@ -211,14 +229,78 @@ def print_classification_report(y_true: List[int],
     print(report)
     return report
 
-def get_device() -> torch.device:
-    """Get the best available device."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
+def get_device(device_preference: str = "auto", force_cpu: bool = False) -> torch.device:
+    """
+    Get the best available device based on preference and availability.
+    
+    Args:
+        device_preference: Device preference ("auto", "cuda", "cpu", or specific GPU like "cuda:0")
+        force_cpu: Force CPU usage even if CUDA is available
+        
+    Returns:
+        torch.device: The selected device
+    """
+    if force_cpu:
         return torch.device("cpu")
+    
+    if device_preference == "auto":
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+    elif device_preference.startswith("cuda"):
+        if torch.cuda.is_available():
+            device = torch.device(device_preference)
+        else:
+            print("⚠️  CUDA not available, falling back to CPU")
+            device = torch.device("cpu")
+    elif device_preference == "mps":
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            print("⚠️  MPS not available, falling back to CPU")
+            device = torch.device("cpu")
+    else:
+        device = torch.device(device_preference)
+    
+    return device
+
+def get_device_info() -> dict:
+    """Get comprehensive device information."""
+    info = {
+        "pytorch_version": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+        "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        "mps_available": hasattr(torch.backends, 'mps') and torch.backends.mps.is_available(),
+        "current_device": None,
+        "device_name": None
+    }
+    
+    if torch.cuda.is_available():
+        info["current_device"] = torch.cuda.current_device()
+        info["device_name"] = torch.cuda.get_device_name(0)
+    
+    return info
+
+def print_device_info():
+    """Print detailed device information."""
+    info = get_device_info()
+    
+    print("=" * 60)
+    print("DEVICE INFORMATION")
+    print("=" * 60)
+    print(f"PyTorch Version: {info['pytorch_version']}")
+    print(f"CUDA Available: {info['cuda_available']}")
+    if info['cuda_available']:
+        print(f"CUDA Version: {info['cuda_version']}")
+        print(f"Number of GPUs: {info['cuda_device_count']}")
+        print(f"Current GPU: {info['current_device']}")
+        print(f"GPU Name: {info['device_name']}")
+    print(f"MPS Available: {info['mps_available']}")
+    print("=" * 60)
 
 def count_parameters(model: torch.nn.Module) -> int:
     """Count the number of trainable parameters in a model."""

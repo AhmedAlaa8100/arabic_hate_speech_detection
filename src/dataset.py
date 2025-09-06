@@ -3,12 +3,13 @@ Dataset handling for Arabic Hate Speech Detection.
 """
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from transformers import AutoTokenizer
 from typing import List, Dict, Any, Optional, Tuple
 import pandas as pd
 from datasets import load_dataset
 import logging
+import numpy as np
 
 from .config import Config
 from .utils import clean_text, setup_logging
@@ -112,31 +113,77 @@ class DataProcessor:
         
         try:
             # Load dataset from Hugging Face
-            dataset = load_dataset(self.config.dataset_name)
+            logger.info("Loading dataset from Hugging Face...")
+            dataset = load_dataset("manueltonneau/arabic-hate-speech-superset")
             
-            # Get train and test splits
-            train_data = dataset[self.config.train_split]
-            test_data = dataset[self.config.test_split]
+            # Check available splits
+            available_splits = list(dataset.keys())
+            logger.info(f"Available splits: {available_splits}")
             
-            logger.info(f"Train samples: {len(train_data)}")
-            logger.info(f"Test samples: {len(test_data)}")
+            if not available_splits:
+                raise ValueError("No splits found in the dataset")
             
-            # Extract texts and labels
-            train_texts = train_data['text']
-            train_labels = train_data['label']
+            # The dataset has only one split, so we'll use it as the main data
+            if "train" in dataset:
+                ds = dataset["train"]
+                logger.info("Using 'train' split")
+            else:
+                # If no "train" split, use the first available split
+                split_name = available_splits[0]
+                ds = dataset[split_name]
+                logger.info(f"Using split: {split_name}")
             
-            test_texts = test_data['text']
-            test_labels = test_data['label']
+            logger.info(f"Total samples: {len(ds)}")
+            logger.info(f"Dataset columns: {ds.column_names}")
             
-            # Create validation split from training data
-            val_size = int(len(train_texts) * self.config.validation_split)
-            val_texts = train_texts[:val_size]
-            val_labels = train_labels[:val_size]
+            # Validate required columns exist
+            required_columns = ['text', 'labels']
+            missing_columns = [col for col in required_columns if col not in ds.column_names]
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {missing_columns}")
             
-            train_texts = train_texts[val_size:]
-            train_labels = train_labels[val_size:]
+            # Extract all texts and labels
+            all_texts = ds['text']
+            all_labels = ds['labels']  # Note: using 'labels' not 'label'
+            
+            # Validate data
+            if len(all_texts) == 0:
+                raise ValueError("No text data found in dataset")
+            if len(all_labels) == 0:
+                raise ValueError("No label data found in dataset")
+            if len(all_texts) != len(all_labels):
+                raise ValueError(f"Mismatch between text ({len(all_texts)}) and labels ({len(all_labels)}) count")
+            
+            logger.info(f"Successfully loaded {len(all_texts)} samples")
+            
+            # Split the data into train, validation, and test sets
+            total_size = len(all_texts)
+            train_size = int(total_size * 0.7)  # 70% for training
+            val_size = int(total_size * 0.15)   # 15% for validation
+            test_size = total_size - train_size - val_size  # 15% for testing
+            
+            logger.info(f"Data split - Train: {train_size}, Val: {val_size}, Test: {test_size}")
+            
+            # Split the data
+            train_texts = all_texts[:train_size]
+            train_labels = all_labels[:train_size]
+            
+            val_texts = all_texts[train_size:train_size + val_size]
+            val_labels = all_labels[train_size:train_size + val_size]
+            
+            test_texts = all_texts[train_size + val_size:]
+            test_labels = all_labels[train_size + val_size:]
             
             logger.info(f"After split - Train: {len(train_texts)}, Val: {len(val_texts)}, Test: {len(test_texts)}")
+            
+            # Log label distribution
+            train_dist = self.get_label_distribution(train_labels)
+            val_dist = self.get_label_distribution(val_labels)
+            test_dist = self.get_label_distribution(test_labels)
+            
+            logger.info(f"Train label distribution: {train_dist}")
+            logger.info(f"Validation label distribution: {val_dist}")
+            logger.info(f"Test label distribution: {test_dist}")
             
             # Create datasets
             train_dataset = ArabicHateSpeechDataset(
@@ -172,20 +219,35 @@ class DataProcessor:
         Returns:
             Tuple of (train_loader, val_loader, test_loader)
         """
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=0,  # Set to 0 for Windows compatibility
-            pin_memory=True if torch.cuda.is_available() else False
-        )
+        # Determine pin_memory based on device configuration
+        pin_memory = self.config.dataloader_pin_memory and torch.cuda.is_available()
+        
+        # Create train loader with optional weighted sampling
+        if self.config.use_sampler:
+            train_sampler = self._create_weighted_sampler(train_dataset)
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=self.config.batch_size,
+                sampler=train_sampler,
+                num_workers=0,  # Set to 0 for Windows compatibility
+                pin_memory=pin_memory
+            )
+            logger.info("Using WeightedRandomSampler for training")
+        else:
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=True,
+                num_workers=0,  # Set to 0 for Windows compatibility
+                pin_memory=pin_memory
+            )
         
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
             num_workers=0,
-            pin_memory=True if torch.cuda.is_available() else False
+            pin_memory=pin_memory
         )
         
         test_loader = DataLoader(
@@ -193,12 +255,75 @@ class DataProcessor:
             batch_size=self.config.batch_size,
             shuffle=False,
             num_workers=0,
-            pin_memory=True if torch.cuda.is_available() else False
+            pin_memory=pin_memory
         )
         
         logger.info(f"DataLoaders created - Batch size: {self.config.batch_size}")
         
         return train_loader, val_loader, test_loader
+    
+    def _create_weighted_sampler(self, dataset: Dataset) -> WeightedRandomSampler:
+        """
+        Create a WeightedRandomSampler for handling class imbalance.
+        
+        Args:
+            dataset: Training dataset
+            
+        Returns:
+            WeightedRandomSampler instance
+        """
+        # Get all labels from the dataset
+        labels = [dataset[i]['labels'].item() for i in range(len(dataset))]
+        
+        # Count occurrences of each class
+        class_counts = np.bincount(labels)
+        
+        # Compute class weights (inverse frequency)
+        class_weights = 1.0 / class_counts
+        
+        # Assign weights to each sample
+        sample_weights = [class_weights[label] for label in labels]
+        
+        # Create sampler
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(dataset),
+            replacement=True
+        )
+        
+        logger.info(f"Created WeightedRandomSampler with class weights: {class_weights}")
+        logger.info(f"Class distribution: {class_counts}")
+        
+        return sampler
+    
+    def compute_class_weights(self, labels: List[int]) -> torch.Tensor:
+        """
+        Compute class weights for handling class imbalance.
+        
+        Args:
+            labels: List of class labels
+            
+        Returns:
+            Class weights tensor
+        """
+        # Count occurrences of each class
+        class_counts = np.bincount(labels)
+        
+        # Avoid division by zero
+        class_counts = np.clamp(class_counts, 1.0, None)
+        
+        # Compute inverse frequency weights
+        total_samples = len(labels)
+        num_classes = len(class_counts)
+        class_weights = total_samples / (num_classes * class_counts)
+        
+        # Normalize weights
+        class_weights = class_weights / class_weights.sum() * num_classes
+        
+        logger.info(f"Class weights computed: {class_weights}")
+        logger.info(f"Class distribution: {class_counts}")
+        
+        return torch.FloatTensor(class_weights)
     
     def get_label_distribution(self, labels: List[int]) -> Dict[int, int]:
         """

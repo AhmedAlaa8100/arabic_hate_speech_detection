@@ -48,6 +48,14 @@ def train_model(config: Config,
         # Print dataset information
         data_processor.print_dataset_info(train_dataset, val_dataset, test_dataset)
         
+        # Compute class weights if using weighted loss
+        class_weights = None
+        if config.loss_function == "weighted":
+            # Get training labels for computing class weights
+            train_labels = [train_dataset[i]['labels'].item() for i in range(len(train_dataset))]
+            class_weights = data_processor.compute_class_weights(train_labels)
+            logger.info(f"Using weighted loss with class weights: {class_weights}")
+        
         # Initialize trainer
         trainer = Trainer(config)
         
@@ -57,7 +65,8 @@ def train_model(config: Config,
             train_loader, 
             val_loader, 
             freeze_bert=freeze_bert,
-            dropout_rate=dropout_rate
+            dropout_rate=dropout_rate,
+            class_weights=class_weights
         )
         
         logger.info("Training completed successfully!")
@@ -145,7 +154,15 @@ def predict_text(config: Config, text: str) -> dict:
         with torch.no_grad():
             outputs = model(input_ids, attention_mask)
             probabilities = torch.softmax(outputs['logits'], dim=-1)
-            prediction = torch.argmax(outputs['logits'], dim=-1)
+            
+            # Use threshold-based prediction if specified
+            if hasattr(config, 'threshold') and config.threshold != 0.5:
+                # Use threshold for classification
+                hate_prob = probabilities[0][1].item()  # Probability of hate speech
+                prediction = torch.tensor([1 if hate_prob > config.threshold else 0])
+            else:
+                # Use argmax for classification
+                prediction = torch.argmax(outputs['logits'], dim=-1)
         
         # Format results
         label_names = ['Not Hate Speech', 'Hate Speech']

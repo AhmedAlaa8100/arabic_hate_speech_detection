@@ -13,11 +13,18 @@ import os
 from typing import Dict, List, Tuple, Any
 import logging
 
+# Import for mixed precision training
+try:
+    from torch.cuda.amp import autocast, GradScaler
+    AMP_AVAILABLE = True
+except ImportError:
+    AMP_AVAILABLE = False
+
 from .config import Config
 from .model import ArabicHateSpeechClassifier, ModelManager
 from .utils import (
     setup_logging, set_seed, get_device, format_time, 
-    plot_training_curves, save_metrics, count_parameters
+    plot_training_curves, save_metrics, count_parameters, print_device_info
 )
 
 logger = setup_logging("training.log")
@@ -35,7 +42,7 @@ class Trainer:
             config: Configuration object
         """
         self.config = config
-        self.device = get_device()
+        self.device = get_device(config.device, config.force_cpu)
         self.model_manager = ModelManager(config)
         
         # Training history
@@ -45,11 +52,22 @@ class Trainer:
         self.best_accuracy = 0.0
         self.early_stopping_counter = 0
         
+        # Mixed precision training
+        self.use_amp = (config.mixed_precision and 
+                       AMP_AVAILABLE and 
+                       self.device.type == 'cuda')
+        self.scaler = GradScaler() if self.use_amp else None
+        
+        # Print device information
+        print_device_info()
+        if self.use_amp:
+            logger.info("Mixed precision training enabled")
         logger.info(f"Trainer initialized on device: {self.device}")
     
     def setup_model_and_optimizer(self, 
                                  freeze_bert: bool = False,
-                                 dropout_rate: float = 0.1) -> Tuple[ArabicHateSpeechClassifier, 
+                                 dropout_rate: float = 0.1,
+                                 class_weights: Optional[torch.Tensor] = None) -> Tuple[ArabicHateSpeechClassifier, 
                                                                    torch.optim.Optimizer,
                                                                    torch.optim.lr_scheduler.LRScheduler]:
         """
@@ -58,12 +76,13 @@ class Trainer:
         Args:
             freeze_bert: Whether to freeze BERT parameters
             dropout_rate: Dropout rate for the classifier
+            class_weights: Class weights for weighted loss
             
         Returns:
             Tuple of (model, optimizer, scheduler)
         """
         # Create model
-        model = self.model_manager.create_model(freeze_bert, dropout_rate)
+        model = self.model_manager.create_model(freeze_bert, dropout_rate, class_weights)
         
         # Setup optimizer
         optimizer = torch.optim.AdamW(
@@ -116,19 +135,37 @@ class Trainer:
             # Zero gradients
             optimizer.zero_grad()
             
-            # Forward pass
-            outputs = model(input_ids, attention_mask, labels)
-            loss = outputs['loss']
-            
-            # Backward pass
-            loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            # Update parameters
-            optimizer.step()
-            scheduler.step()
+            # Forward pass with mixed precision if enabled
+            if self.use_amp:
+                with autocast():
+                    outputs = model(input_ids, attention_mask, labels)
+                    loss = outputs['loss']
+                
+                # Backward pass with scaling
+                self.scaler.scale(loss).backward()
+                
+                # Gradient clipping
+                self.scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                # Update parameters
+                self.scaler.step(optimizer)
+                self.scaler.update()
+                scheduler.step()
+            else:
+                # Standard training without mixed precision
+                outputs = model(input_ids, attention_mask, labels)
+                loss = outputs['loss']
+                
+                # Backward pass
+                loss.backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                # Update parameters
+                optimizer.step()
+                scheduler.step()
             
             # Update loss
             total_loss += loss.item()
@@ -174,8 +211,12 @@ class Trainer:
                 attention_mask = batch['attention_mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
                 
-                # Forward pass
-                outputs = model(input_ids, attention_mask, labels)
+                # Forward pass with mixed precision if enabled
+                if self.use_amp:
+                    with autocast():
+                        outputs = model(input_ids, attention_mask, labels)
+                else:
+                    outputs = model(input_ids, attention_mask, labels)
                 loss = outputs['loss']
                 logits = outputs['logits']
                 
@@ -203,7 +244,8 @@ class Trainer:
               train_loader: DataLoader,
               val_loader: DataLoader,
               freeze_bert: bool = False,
-              dropout_rate: float = 0.1) -> Dict[str, Any]:
+              dropout_rate: float = 0.1,
+              class_weights: Optional[torch.Tensor] = None) -> Dict[str, Any]:
         """
         Main training loop.
         
@@ -212,6 +254,7 @@ class Trainer:
             val_loader: Validation data loader
             freeze_bert: Whether to freeze BERT parameters
             dropout_rate: Dropout rate for the classifier
+            class_weights: Class weights for weighted loss
             
         Returns:
             Training results dictionary
@@ -223,7 +266,7 @@ class Trainer:
         set_seed(self.config.seed)
         
         # Setup model and optimizer
-        model, optimizer, scheduler = self.setup_model_and_optimizer(freeze_bert, dropout_rate)
+        model, optimizer, scheduler = self.setup_model_and_optimizer(freeze_bert, dropout_rate, class_weights)
         
         logger.info("Starting training...")
         logger.info(f"Epochs: {self.config.num_epochs}")

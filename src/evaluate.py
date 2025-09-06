@@ -8,6 +8,7 @@ from tqdm import tqdm
 import numpy as np
 from typing import Dict, List, Tuple, Any
 import logging
+import json
 from sklearn.metrics import (
     accuracy_score, precision_recall_fscore_support, 
     classification_report, confusion_matrix
@@ -62,13 +63,15 @@ class Evaluator:
     
     def evaluate_model(self, 
                       model: ArabicHateSpeechClassifier,
-                      test_loader: DataLoader) -> Dict[str, Any]:
+                      test_loader: DataLoader,
+                      threshold: float = None) -> Dict[str, Any]:
         """
         Evaluate model on test set.
         
         Args:
             model: Model to evaluate
             test_loader: Test data loader
+            threshold: Probability threshold for classification (if None, uses argmax)
             
         Returns:
             Dictionary containing evaluation metrics
@@ -81,6 +84,8 @@ class Evaluator:
         total_loss = 0.0
         
         logger.info("Starting evaluation...")
+        if threshold is not None:
+            logger.info(f"Using threshold: {threshold}")
         
         with torch.no_grad():
             progress_bar = tqdm(test_loader, desc="Evaluating", leave=False)
@@ -98,7 +103,15 @@ class Evaluator:
                 
                 # Get predictions and probabilities
                 probabilities = torch.softmax(logits, dim=-1)
-                predictions = torch.argmax(logits, dim=-1)
+                
+                # Use threshold-based prediction if specified
+                if threshold is not None:
+                    # Use threshold for classification
+                    hate_probs = probabilities[:, 1]  # Probability of hate speech
+                    predictions = (hate_probs > threshold).long()
+                else:
+                    # Use argmax for classification
+                    predictions = torch.argmax(logits, dim=-1)
                 
                 # Store results
                 all_predictions.extend(predictions.cpu().numpy())
@@ -125,23 +138,29 @@ class Evaluator:
             all_labels, all_predictions, average=None
         )
         
+        # Create detailed per-class metrics
+        per_class_metrics = {}
+        for i, class_name in enumerate(self.label_names):
+            per_class_metrics[class_name] = {
+                'precision': float(precision_per_class[i]),
+                'recall': float(recall_per_class[i]),
+                'f1_score': float(f1_per_class[i]),
+                'support': int(support_per_class[i])
+            }
+        
         # Create metrics dictionary
         metrics = {
-            'test_loss': avg_loss,
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1,
-            'support': support,
-            'per_class_metrics': {
-                'precision': precision_per_class.tolist(),
-                'recall': recall_per_class.tolist(),
-                'f1_score': f1_per_class.tolist(),
-                'support': support_per_class.tolist()
-            },
-            'predictions': all_predictions,
-            'labels': all_labels,
-            'probabilities': all_probabilities
+            'test_loss': float(avg_loss),
+            'accuracy': float(accuracy),
+            'precision': float(precision),
+            'recall': float(recall),
+            'f1_score': float(f1),
+            'support': int(support),
+            'threshold': threshold,
+            'per_class_metrics': per_class_metrics,
+            'predictions': [int(p) for p in all_predictions],  # Convert to int for JSON serialization
+            'labels': [int(l) for l in all_labels],  # Convert to int for JSON serialization
+            'probabilities': [[float(prob) for prob in probs] for probs in all_probabilities]  # Convert to float for JSON serialization
         }
         
         # Log results
@@ -153,6 +172,8 @@ class Evaluator:
         logger.info(f"Precision: {precision:.4f}")
         logger.info(f"Recall: {recall:.4f}")
         logger.info(f"F1-Score: {f1:.4f}")
+        if threshold is not None:
+            logger.info(f"Threshold: {threshold:.4f}")
         logger.info(f"{'='*50}")
         
         return metrics
@@ -282,6 +303,49 @@ class Evaluator:
         
         return analysis
     
+    def evaluate_multiple_thresholds(self, 
+                                    model: ArabicHateSpeechClassifier,
+                                    test_loader: DataLoader,
+                                    thresholds: List[float] = None) -> Dict[str, Any]:
+        """
+        Evaluate model with multiple thresholds for threshold tuning.
+        
+        Args:
+            model: Model to evaluate
+            test_loader: Test data loader
+            thresholds: List of thresholds to test (if None, uses default range)
+            
+        Returns:
+            Dictionary containing results for all thresholds
+        """
+        if thresholds is None:
+            thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        
+        logger.info(f"Evaluating with thresholds: {thresholds}")
+        
+        results = {}
+        for threshold in thresholds:
+            logger.info(f"Evaluating with threshold: {threshold}")
+            metrics = self.evaluate_model(model, test_loader, threshold)
+            results[f"threshold_{threshold}"] = metrics
+        
+        # Find best threshold based on F1-score
+        best_threshold = None
+        best_f1 = 0.0
+        
+        for threshold in thresholds:
+            f1 = results[f"threshold_{threshold}"]['f1_score']
+            if f1 > best_f1:
+                best_f1 = f1
+                best_threshold = threshold
+        
+        results['best_threshold'] = best_threshold
+        results['best_f1_score'] = best_f1
+        
+        logger.info(f"Best threshold: {best_threshold} (F1-score: {best_f1:.4f})")
+        
+        return results
+    
     def evaluate_and_save_results(self, 
                                  test_loader: DataLoader,
                                  texts: List[str] = None) -> Dict[str, Any]:
@@ -298,8 +362,14 @@ class Evaluator:
         # Load best model
         model = self.load_best_model()
         
-        # Evaluate model
-        metrics = self.evaluate_model(model, test_loader)
+        # Evaluate model with configured threshold
+        threshold = getattr(self.config, 'threshold', 0.5)
+        if threshold == 0.5:
+            # Use argmax if threshold is 0.5 (default)
+            metrics = self.evaluate_model(model, test_loader, threshold=None)
+        else:
+            # Use specified threshold
+            metrics = self.evaluate_model(model, test_loader, threshold=threshold)
         
         # Print detailed report
         self.print_detailed_report(metrics['labels'], metrics['predictions'])
@@ -325,9 +395,10 @@ class Evaluator:
             'config': self.config.__dict__
         }
         
-        # Save results
+        # Save results with proper JSON serialization
         results_file = f"{self.config.results_dir}/evaluation_results.json"
-        save_metrics(complete_results, results_file)
+        with open(results_file, 'w', encoding='utf-8') as f:
+            json.dump(complete_results, f, indent=2, ensure_ascii=False)
         
         logger.info(f"Complete evaluation results saved to: {results_file}")
         
