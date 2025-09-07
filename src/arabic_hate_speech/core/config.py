@@ -67,6 +67,10 @@ class Config:
     focal_alpha: float = 1.0  # Alpha parameter for focal loss
     focal_gamma: float = 2.0  # Gamma parameter for focal loss
     
+    # Custom dataset configuration
+    custom_dataset: bool = False  # Use custom combined dataset instead of Hugging Face
+    custom_dataset_path: str = "data/combined"  # Path to custom dataset directory
+    
     def __post_init__(self):
         """Create necessary directories after initialization."""
         os.makedirs(self.data_dir, exist_ok=True)
@@ -103,5 +107,3 @@ class Config:
             print(f"Warning: Config file {config_path} not found, using default values")
             return cls()
 
-# Global config instance
-config = Config.from_json()

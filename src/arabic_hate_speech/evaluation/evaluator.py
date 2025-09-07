@@ -14,11 +14,12 @@ from sklearn.metrics import (
     classification_report, confusion_matrix
 )
 
-from .config import Config
-from .model import ArabicHateSpeechClassifier, ModelManager
-from .utils import (
-    setup_logging, get_device, plot_confusion_matrix, 
-    print_classification_report, save_metrics
+from ..core.config import Config
+from ..core.model import ArabicHateSpeechClassifier, ModelManager
+from ..utils.logging import setup_logging
+from ..utils.device import get_device
+from .metrics import (
+    plot_confusion_matrix, print_classification_report, save_metrics
 )
 
 logger = setup_logging("evaluation.log")
@@ -36,7 +37,7 @@ class Evaluator:
             config: Configuration object
         """
         self.config = config
-        self.device = get_device()
+        self.device = get_device(config.device, config.force_cpu)
         self.model_manager = ModelManager(config)
         
         # Label names for classification report
@@ -129,9 +130,12 @@ class Evaluator:
         accuracy = accuracy_score(all_labels, all_predictions)
         
         # Calculate precision, recall, f1-score
-        precision, recall, f1, support = precision_recall_fscore_support(
+        precision, recall, f1, _ = precision_recall_fscore_support(
             all_labels, all_predictions, average='weighted'
         )
+        
+        # Calculate support separately
+        support = int(len(all_labels))
         
         # Calculate per-class metrics
         precision_per_class, recall_per_class, f1_per_class, support_per_class = precision_recall_fscore_support(

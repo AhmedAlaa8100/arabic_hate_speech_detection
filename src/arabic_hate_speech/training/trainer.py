@@ -10,7 +10,7 @@ from tqdm import tqdm
 import time
 import json
 import os
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import logging
 
 # Import for mixed precision training
@@ -20,12 +20,14 @@ try:
 except ImportError:
     AMP_AVAILABLE = False
 
-from .config import Config
-from .model import ArabicHateSpeechClassifier, ModelManager
-from .utils import (
-    setup_logging, set_seed, get_device, format_time, 
-    plot_training_curves, save_metrics, count_parameters, print_device_info
+from ..core.config import Config
+from ..core.model import ArabicHateSpeechClassifier, ModelManager
+from ..utils.logging import setup_logging
+from ..utils.helpers import (
+    set_seed, format_time, plot_training_curves, 
+    save_metrics, count_parameters, print_device_info
 )
+from ..utils.device import get_device
 
 logger = setup_logging("training.log")
 

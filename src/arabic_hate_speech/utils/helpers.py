@@ -137,13 +137,6 @@ def save_metrics(metrics: Dict[str, Any], filepath: str) -> None:
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(converted_metrics, f, indent=2, ensure_ascii=False)
 
-def load_metrics(filepath: str) -> Dict[str, Any]:
-    """Load metrics from JSON file."""
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
 
 def plot_training_curves(train_losses: List[float], 
                         eval_losses: List[float], 
@@ -314,3 +307,11 @@ def format_time(seconds: float) -> str:
         return f"{seconds/60:.2f}m"
     else:
         return f"{seconds/3600:.2f}h"
+
+def load_metrics(filepath: str) -> Dict[str, Any]:
+    """Load metrics from JSON file."""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}

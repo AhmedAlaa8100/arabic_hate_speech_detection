@@ -9,8 +9,9 @@ from typing import Optional, Dict, Any
 import logging
 
 from .config import Config
-from .utils import setup_logging, count_parameters
 from .losses import get_loss_function
+from ..utils.logging import setup_logging
+from ..utils.helpers import count_parameters
 
 logger = setup_logging("model.log")
 

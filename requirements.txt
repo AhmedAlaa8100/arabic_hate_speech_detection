@@ -18,6 +18,10 @@ tqdm>=4.64.0
 # Logging and configuration
 dataclasses-json>=0.5.7
 
+# Dataset Building and Processing
+# Note: collections.Counter and argparse are built-in Python modules
+# No additional packages required for dataset building functionality
+
 # Optional: For better performance
 accelerate>=0.20.0
 

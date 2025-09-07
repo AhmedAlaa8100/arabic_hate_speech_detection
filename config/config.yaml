@@ -1,0 +1,61 @@
+# Arabic Hate Speech Detection Configuration
+
+# Model Configuration
+model:
+  name: "aubmindlab/bert-base-arabertv02"
+  num_labels: 2
+  max_length: 128
+  dropout_rate: 0.1
+  freeze_bert: false
+
+# Training Configuration
+training:
+  batch_size: 16
+  learning_rate: 2e-5
+  num_epochs: 3
+  warmup_steps: 100
+  weight_decay: 0.01
+  early_stopping_patience: 3
+  mixed_precision: true
+  dataloader_pin_memory: true
+
+# Data Configuration
+data:
+  dataset_name: "manueltonneau/arabic-hate-speech-superset"
+  train_split: "train"
+  test_split: "test"
+  validation_split: 0.1
+  custom_dataset: false
+  custom_dataset_path: "data/combined"
+  use_sampler: false
+
+# Loss Configuration
+loss:
+  function: "ce" # ce, weighted, focal
+  threshold: 0.5
+  focal_alpha: 1.0
+  focal_gamma: 2.0
+
+# Device Configuration
+device:
+  device: "auto" # auto, cuda, cpu, or specific GPU like "cuda:0"
+  force_cpu: false
+
+# Paths
+paths:
+  data_dir: "data"
+  models_dir: "models"
+  results_dir: "results"
+  log_file: "results/logs/training.log"
+  loss_plot_path: "results/plots/loss_curve.png"
+  metrics_file: "results/metrics/metrics.json"
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  steps: 100
+  save_steps: 500
+  eval_steps: 500
+
+# Random seed for reproducibility
+seed: 42

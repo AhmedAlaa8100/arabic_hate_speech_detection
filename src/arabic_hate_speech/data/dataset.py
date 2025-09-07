@@ -2,6 +2,7 @@
 Dataset handling for Arabic Hate Speech Detection.
 """
 
+import os
 import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from transformers import AutoTokenizer
@@ -11,8 +12,9 @@ from datasets import load_dataset
 import logging
 import numpy as np
 
-from .config import Config
-from .utils import clean_text, setup_logging
+from ..core.config import Config
+from ..utils.logging import setup_logging
+from .preprocessing import clean_text
 
 logger = setup_logging("dataset.log")
 
@@ -112,97 +114,184 @@ class DataProcessor:
         logger.info(f"Loading dataset: {self.config.dataset_name}")
         
         try:
-            # Load dataset from Hugging Face
-            logger.info("Loading dataset from Hugging Face...")
-            dataset = load_dataset("manueltonneau/arabic-hate-speech-superset")
-            
-            # Check available splits
-            available_splits = list(dataset.keys())
-            logger.info(f"Available splits: {available_splits}")
-            
-            if not available_splits:
-                raise ValueError("No splits found in the dataset")
-            
-            # The dataset has only one split, so we'll use it as the main data
-            if "train" in dataset:
-                ds = dataset["train"]
-                logger.info("Using 'train' split")
+            # Check if custom dataset is enabled
+            if hasattr(self.config, 'custom_dataset') and self.config.custom_dataset:
+                logger.info("Loading custom dataset from local CSV files...")
+                return self._load_custom_dataset()
             else:
-                # If no "train" split, use the first available split
-                split_name = available_splits[0]
-                ds = dataset[split_name]
-                logger.info(f"Using split: {split_name}")
-            
-            logger.info(f"Total samples: {len(ds)}")
-            logger.info(f"Dataset columns: {ds.column_names}")
-            
-            # Validate required columns exist
-            required_columns = ['text', 'labels']
-            missing_columns = [col for col in required_columns if col not in ds.column_names]
-            if missing_columns:
-                raise ValueError(f"Missing required columns: {missing_columns}")
-            
-            # Extract all texts and labels
-            all_texts = ds['text']
-            all_labels = ds['labels']  # Note: using 'labels' not 'label'
-            
-            # Validate data
-            if len(all_texts) == 0:
-                raise ValueError("No text data found in dataset")
-            if len(all_labels) == 0:
-                raise ValueError("No label data found in dataset")
-            if len(all_texts) != len(all_labels):
-                raise ValueError(f"Mismatch between text ({len(all_texts)}) and labels ({len(all_labels)}) count")
-            
-            logger.info(f"Successfully loaded {len(all_texts)} samples")
-            
-            # Split the data into train, validation, and test sets
-            total_size = len(all_texts)
-            train_size = int(total_size * 0.7)  # 70% for training
-            val_size = int(total_size * 0.15)   # 15% for validation
-            test_size = total_size - train_size - val_size  # 15% for testing
-            
-            logger.info(f"Data split - Train: {train_size}, Val: {val_size}, Test: {test_size}")
-            
-            # Split the data
-            train_texts = all_texts[:train_size]
-            train_labels = all_labels[:train_size]
-            
-            val_texts = all_texts[train_size:train_size + val_size]
-            val_labels = all_labels[train_size:train_size + val_size]
-            
-            test_texts = all_texts[train_size + val_size:]
-            test_labels = all_labels[train_size + val_size:]
-            
-            logger.info(f"After split - Train: {len(train_texts)}, Val: {len(val_texts)}, Test: {len(test_texts)}")
-            
-            # Log label distribution
-            train_dist = self.get_label_distribution(train_labels)
-            val_dist = self.get_label_distribution(val_labels)
-            test_dist = self.get_label_distribution(test_labels)
-            
-            logger.info(f"Train label distribution: {train_dist}")
-            logger.info(f"Validation label distribution: {val_dist}")
-            logger.info(f"Test label distribution: {test_dist}")
-            
-            # Create datasets
-            train_dataset = ArabicHateSpeechDataset(
-                train_texts, train_labels, self.tokenizer, self.config.max_length
-            )
-            
-            val_dataset = ArabicHateSpeechDataset(
-                val_texts, val_labels, self.tokenizer, self.config.max_length
-            )
-            
-            test_dataset = ArabicHateSpeechDataset(
-                test_texts, test_labels, self.tokenizer, self.config.max_length
-            )
-            
-            return train_dataset, val_dataset, test_dataset
+                # Load dataset from Hugging Face
+                logger.info("Loading dataset from Hugging Face...")
+                return self._load_huggingface_dataset()
             
         except Exception as e:
             logger.error(f"Error loading dataset: {str(e)}")
             raise
+    
+    def _load_huggingface_dataset(self) -> Tuple[Dataset, Dataset, Dataset]:
+        """
+        Load dataset from Hugging Face.
+        
+        Returns:
+            Tuple of (train_dataset, val_dataset, test_dataset)
+        """
+        dataset = load_dataset("manueltonneau/arabic-hate-speech-superset")
+        
+        # Check available splits
+        available_splits = list(dataset.keys())
+        logger.info(f"Available splits: {available_splits}")
+        
+        if not available_splits:
+            raise ValueError("No splits found in the dataset")
+        
+        # The dataset has only one split, so we'll use it as the main data
+        if "train" in dataset:
+            ds = dataset["train"]
+            logger.info("Using 'train' split")
+        else:
+            # If no "train" split, use the first available split
+            split_name = available_splits[0]
+            ds = dataset[split_name]
+            logger.info(f"Using split: {split_name}")
+        
+        logger.info(f"Total samples: {len(ds)}")
+        logger.info(f"Dataset columns: {ds.column_names}")
+        
+        # Validate required columns exist
+        required_columns = ['text', 'labels']
+        missing_columns = [col for col in required_columns if col not in ds.column_names]
+        if missing_columns:
+            raise ValueError(f"Missing required columns: {missing_columns}")
+        
+        # Extract all texts and labels
+        all_texts = ds['text']
+        all_labels = ds['labels']  # Note: using 'labels' not 'label'
+        
+        # Validate data
+        if len(all_texts) == 0:
+            raise ValueError("No text data found in dataset")
+        if len(all_labels) == 0:
+            raise ValueError("No label data found in dataset")
+        if len(all_texts) != len(all_labels):
+            raise ValueError(f"Mismatch between text ({len(all_texts)}) and labels ({len(all_labels)}) count")
+        
+        logger.info(f"Successfully loaded {len(all_texts)} samples")
+        
+        # Split the data into train, validation, and test sets
+        total_size = len(all_texts)
+        train_size = int(total_size * 0.7)  # 70% for training
+        val_size = int(total_size * 0.15)   # 15% for validation
+        test_size = total_size - train_size - val_size  # 15% for testing
+        
+        logger.info(f"Data split - Train: {train_size}, Val: {val_size}, Test: {test_size}")
+        
+        # Split the data
+        train_texts = all_texts[:train_size]
+        train_labels = all_labels[:train_size]
+        
+        val_texts = all_texts[train_size:train_size + val_size]
+        val_labels = all_labels[train_size:train_size + val_size]
+        
+        test_texts = all_texts[train_size + val_size:]
+        test_labels = all_labels[train_size + val_size:]
+        
+        logger.info(f"After split - Train: {len(train_texts)}, Val: {len(val_texts)}, Test: {len(test_texts)}")
+        
+        # Log label distribution
+        train_dist = self.get_label_distribution(train_labels)
+        val_dist = self.get_label_distribution(val_labels)
+        test_dist = self.get_label_distribution(test_labels)
+        
+        logger.info(f"Train label distribution: {train_dist}")
+        logger.info(f"Validation label distribution: {val_dist}")
+        logger.info(f"Test label distribution: {test_dist}")
+        
+        # Create datasets
+        train_dataset = ArabicHateSpeechDataset(
+            train_texts, train_labels, self.tokenizer, self.config.max_length
+        )
+        
+        val_dataset = ArabicHateSpeechDataset(
+            val_texts, val_labels, self.tokenizer, self.config.max_length
+        )
+        
+        test_dataset = ArabicHateSpeechDataset(
+            test_texts, test_labels, self.tokenizer, self.config.max_length
+        )
+        
+        return train_dataset, val_dataset, test_dataset
+    
+    def _load_custom_dataset(self) -> Tuple[Dataset, Dataset, Dataset]:
+        """
+        Load custom dataset from local CSV files.
+        
+        Returns:
+            Tuple of (train_dataset, val_dataset, test_dataset)
+        """
+        logger.info("Loading custom dataset from CSV files...")
+        
+        # Get custom dataset path
+        custom_path = getattr(self.config, 'custom_dataset_path', 'data/combined')
+        
+        # Load CSV files
+        train_path = os.path.join(custom_path, 'train.csv')
+        val_path = os.path.join(custom_path, 'val.csv')
+        test_path = os.path.join(custom_path, 'test.csv')
+        
+        # Check if files exist
+        for path in [train_path, val_path, test_path]:
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Custom dataset file not found: {path}")
+        
+        # Load DataFrames
+        train_df = pd.read_csv(train_path)
+        val_df = pd.read_csv(val_path)
+        test_df = pd.read_csv(test_path)
+        
+        logger.info(f"Loaded custom dataset:")
+        logger.info(f"  Train: {len(train_df)} samples")
+        logger.info(f"  Validation: {len(val_df)} samples")
+        logger.info(f"  Test: {len(test_df)} samples")
+        
+        # Validate columns
+        required_columns = ['text', 'label']
+        for df, name in [(train_df, 'train'), (val_df, 'val'), (test_df, 'test')]:
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                raise ValueError(f"Missing required columns in {name} dataset: {missing_columns}")
+        
+        # Extract texts and labels
+        train_texts = train_df['text'].tolist()
+        train_labels = train_df['label'].tolist()
+        
+        val_texts = val_df['text'].tolist()
+        val_labels = val_df['label'].tolist()
+        
+        test_texts = test_df['text'].tolist()
+        test_labels = test_df['label'].tolist()
+        
+        # Log label distributions
+        train_dist = self.get_label_distribution(train_labels)
+        val_dist = self.get_label_distribution(val_labels)
+        test_dist = self.get_label_distribution(test_labels)
+        
+        logger.info(f"Train label distribution: {train_dist}")
+        logger.info(f"Validation label distribution: {val_dist}")
+        logger.info(f"Test label distribution: {test_dist}")
+        
+        # Create datasets
+        train_dataset = ArabicHateSpeechDataset(
+            train_texts, train_labels, self.tokenizer, self.config.max_length
+        )
+        
+        val_dataset = ArabicHateSpeechDataset(
+            val_texts, val_labels, self.tokenizer, self.config.max_length
+        )
+        
+        test_dataset = ArabicHateSpeechDataset(
+            test_texts, test_labels, self.tokenizer, self.config.max_length
+        )
+        
+        return train_dataset, val_dataset, test_dataset
     
     def create_dataloaders(self, 
                           train_dataset: Dataset, 
